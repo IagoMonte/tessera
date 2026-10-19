@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "slug": "tessera",
+  "title": {
+    "pt": "Tessera"
+  },
+  "summary": {
+    "pt": "Orquestrador de terminais focado em CLI: sessões tmux e ttyd persistentes por projeto em todas as máquinas via Tailscale, com painel web e avisos no Telegram."
+  },
+  "status": "live",
+  "category": {
+    "slug": "automacao",
+    "name": {
+      "pt": "automação"
+    },
+    "tagline": {
+      "pt": "Terminais e rotinas que se operam sozinhos: painel, agentes e avisos."
+    },
+    "colors": [
+      "#F0C674",
+      "#0B0B0D"
+    ],
+    "fx": "pipeline"
+  },
+  "stack": [
+    "Python",
+    "tmux",
+    "ttyd",
+    "Tailscale",
+    "xterm.js",
+    "Telegram",
+    "systemd",
+    "Bash"
+  ],
+  "facts": {
+    "role": {
+      "pt": "Autor e desenvolvedor"
+    },
+    "period": {
+      "start": "2026-10",
+      "end": "atual"
+    },
+    "context": {
+      "pt": "projeto pessoal"
+    }
+  },
+  "links": [
+    {
+      "kind": "repo",
+      "url": "https://github.com/IagoMonte/tessera"
+    }
+  ],
+  "thumbnail": "thumbnail.png",
+  "shots": [
+    {
+      "file": "shots/01-painel.png",
+      "caption": {
+        "pt": "painel com máquinas, projetos e terminal persistente"
+      },
+      "format": "desktop"
+    },
+    {
+      "file": "shots/02-painel-mobile.png",
+      "caption": {
+        "pt": "projetos e terminais no celular"
+      },
+      "format": "mobile"
+    }
+  ],
+  "docs": [
+    {
+      "name": "README",
+      "file": "docs/readme.md"
+    },
+    {
+      "name": "ARQUITETURA",
+      "file": "docs/arquitetura.md"
+    },
+    {
+      "name": "CHANGELOG",
+      "file": "docs/changelog.md"
+    }
+  ]
+}
