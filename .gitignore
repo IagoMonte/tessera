@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+painel/dados/
+*.log
+*.tar.gz
+
+# segredos de deploy — nunca commitar
+deploy.env
+*.key
+*.pem
+
+# relatórios/checklists locais de segurança — descrevem infra real, nunca commitar
+sec-*.md
+todo-sec.md

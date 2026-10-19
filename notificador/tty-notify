@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Envia um evento ao painel (que repassa ao Telegram). Nunca falha: avisar não pode quebrar quem chama.
+#   tty-notify <motivo> [texto...]
+#   tty-notify --claude <motivo>     lê o JSON do hook do Claude Code no stdin
+#   tty-notify --arquivo <caminho> [legenda...]   manda um arquivo (até 50 MB) ao Telegram
+# motivos: terminou aprovacao pergunta erro ocioso online
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"   # modo sem root: config no HOME do usuário
+if [ -n "${TTY_ETC:-}" ]; then ETC=$TTY_ETC; elif [ -r "$UETC/conf" ]; then ETC=$UETC; else ETC=/etc/tty-orquestrador; fi
+if [ -n "${TTY_CONF:-}" ]; then CONF=$TTY_CONF; elif [ "$ETC" = "$UETC" ]; then CONF=$UETC/conf; else CONF=/etc/tty-orquestrador.conf; fi
+[ -r "$CONF" ] && . "$CONF"
+[ -n "${PAINEL_URL:-}" ] || exit 0
+AUTH=(); [ -n "${PAINEL_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $PAINEL_TOKEN")
+
+arquivo=
+if [ "${1:-}" = "--arquivo" ]; then
+  shift; arquivo=${1:-}; shift || true
+  if [ ! -f "$arquivo" ] || [ ! -r "$arquivo" ]; then echo "tty-notify: arquivo não encontrado: $arquivo" >&2; exit 1; fi
+  set -- terminou "$@"
+fi
+
+texto=
+if [ "${1:-}" = "--claude" ]; then
+  shift
+  texto=$(jq -r '.message // empty' 2>/dev/null)
+  [ -n "$texto" ] || texto="Claude Code ${1:-}"
+fi
+motivo=${1:-terminou}; shift || true
+[ -n "$texto" ] || texto="$*"
+
+sessao=${TTY_SESSAO:-}
+[ -z "$sessao" ] && [ -n "${TMUX:-}" ] && sessao=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null)
+# sem TMUX no ambiente (ex. plugin que roda fora do painel): acha a sessão "projeto/terminal" pela pasta atual
+if [ -z "$sessao" ] && command -v tmux >/dev/null 2>&1; then
+  sessao=$(tmux list-panes -a -F '#{session_name} #{pane_current_path}' 2>/dev/null |
+    awk -v d="$PWD" '$1 ~ /\// { p=$0; sub(/^[^ ]+ /, "", p); if (p == d) { print $1; exit } }')
+fi
+
+# sessões dos projetos se chamam "projeto/terminal"
+projeto= terminal=
+case $sessao in */*) projeto=${sessao%%/*}; terminal=${sessao#*/} ;; esac
+# ainda sem projeto (ex. OpenCode rodando fora do tmux): descobre pela pasta de trabalho (TTY_DIR ou a atual) o projeto
+# cuja DIR contém essa pasta (vale o mais específico); o terminal fica em branco
+if [ -z "$projeto" ]; then
+  d=${TTY_DIR:-$PWD}; melhor=0
+  for c in "$ETC"/projetos/*.conf; do
+    [ -e "$c" ] || continue
+    pd=$(sed -n 's/^DIR=//p' "$c" | head -1 | sed 's/\\\(.\)/\1/g'); pd=${pd%/}
+    [ -n "$pd" ] || continue
+    case "$d/" in "$pd"/*) [ ${#pd} -gt "$melhor" ] && { melhor=${#pd}; projeto=$(basename "$c" .conf); } ;; esac
+  done
+fi
+# não achou: o próprio aviso diz por quê (pasta e quantos projetos esta instalação conhece)
+if [ -z "$projeto" ] && [ -z "$sessao" ]; then
+  n=$(ls "$ETC"/projetos/*.conf 2>/dev/null | wc -l)
+  texto="$texto [sem projeto: pasta $d, $n projeto(s) em $ETC, tmux $([ -n "${TMUX:-}" ] && echo sim || echo não)]"
+fi
+
+if [ -n "$arquivo" ]; then
+  q=$(jq -rn --arg m "${MAQUINA:-$(hostname)}" --arg p "$projeto" --arg x "$terminal" --arg n "$(basename "$arquivo")" --arg l "$texto" \
+    '"maquina=\($m|@uri)&projeto=\($p|@uri)&terminal=\($x|@uri)&nome=\($n|@uri)&legenda=\($l|@uri)"') || exit 1
+  r=$(curl -fsS -m 120 "${AUTH[@]}" -X POST --data-binary "@$arquivo" -H 'Content-Type: application/octet-stream' "$PAINEL_URL/api/arquivo?$q" 2>&1) \
+    || { echo "tty-notify: envio falhou: $r" >&2; exit 1; }
+  case $r in *'"telegram": true'*) ;; *) echo "tty-notify: painel recebeu, mas o Telegram não enviou" >&2; exit 1 ;; esac
+  exit 0
+fi
+
+corpo=$(jq -n --arg m "${MAQUINA:-$(hostname)}" --arg s "$sessao" --arg p "$projeto" --arg x "$terminal" --arg r "$motivo" --arg t "$texto" \
+  '{maquina:$m, sessao:$s, projeto:$p, terminal:$x, motivo:$r, texto:$t}') || exit 0
+curl -fsS -m 3 "${AUTH[@]}" -o /dev/null -H 'Content-Type: application/json' -d "$corpo" "$PAINEL_URL/api/evento" 2>/dev/null
+exit 0

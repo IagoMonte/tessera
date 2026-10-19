@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Sobe o ttyd de um projeto a partir de /etc/tty-orquestrador/projetos/<nome>.conf (DIR, USUARIO, PORTA).
+#   tty-ttyd <projeto>
+set -eu
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"   # modo sem root: config no HOME do usuário
+if [ -n "${TTY_ETC:-}" ]; then ETC=$TTY_ETC; elif [ -r "$UETC/conf" ]; then ETC=$UETC; else ETC=/etc/tty-orquestrador; fi
+nome=${1:?uso: tty-ttyd <projeto>}
+[[ "$nome" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]] || { echo "projeto inválido" >&2; exit 2; }
+. "$ETC/projetos/$nome.conf"
+IFACE=${TTY_IFACE:-tailscale0}
+# tema do Tessera (escuro); o painel aplica o tema ativo nos seus próprios terminais
+tema='{"background":"#0f0f12","foreground":"#ececee","cursor":"#8ab4ff","selectionBackground":"#2a3550"}'
+exec ttyd -W -O -a -i "$IFACE" -p "$PORTA" \
+  -t titleFixed="$nome" -t fontSize=13 -t "fontFamily=Geist Mono, ui-monospace, monospace" -t "theme=$tema" \
+  tty-sessao "$nome" "$DIR"

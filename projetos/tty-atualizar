@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Atualiza os scripts desta instalação (tty-notify, tty-add, agente, ...) com o pacote atual do painel.
+# Não reinstala nada, não mexe em projetos, serviços, .conf nem tailnet; só reinicia o agente se ELE mudou.
+# Serve para os dois modos (com root: /usr/local/lib; sem root: ~/.local/lib), pois acha tudo a partir do próprio caminho.
+#   tty-atualizar
+set -u
+ESTE=$(readlink -f "$0")
+LIB=$(dirname "$(dirname "$ESTE")")      # .../lib/tty-orquestrador
+BIN=$(dirname "$LIB")/../bin             # .../bin (usr/local/bin ou ~/.local/bin)
+BIN=$(cd "$BIN" 2>/dev/null && pwd) || { echo "não achei a pasta bin ao lado de $LIB"; exit 1; }
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"
+if [ "$LIB" = /usr/local/lib/tty-orquestrador ]; then CONF=/etc/tty-orquestrador.conf; else CONF=$UETC/conf; fi
+[ -r "$CONF" ] && . "$CONF"
+[ -n "${PAINEL_URL:-}" ] || { echo "sem PAINEL_URL em $CONF"; exit 1; }
+
+NOVO="$LIB.novo"; VELHO="$LIB.velho"
+rm -rf "$NOVO" "$VELHO"; mkdir -p "$NOVO"
+AUTH=(); [ -n "${PAINEL_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $PAINEL_TOKEN")
+curl -fsSL -m 60 "${AUTH[@]}" "$PAINEL_URL/pacote.tar.gz" | tar -xz -C "$NOVO" 2>/dev/null || { rm -rf "$NOVO"; echo "não consegui baixar o pacote de $PAINEL_URL"; exit 1; }
+[ -f "$NOVO/agente/agente.py" ] && [ -f "$NOVO/notificador/tty-notify" ] || { rm -rf "$NOVO"; echo "pacote incompleto, nada foi alterado"; exit 1; }
+
+# o que mudou (para dizer ao usuário e decidir se o agente reinicia)
+mudou=$(diff -rq "$LIB" "$NOVO" 2>/dev/null | grep -v '__pycache__' | sed -E 's#^Files (\S+) and .*#\1#; s#^Only in (\S+): (.*)#\1/\2#' | xargs -r -n1 basename | sort -u | tr '\n' ' ')
+agente_mudou=0; cmp -s "$LIB/agente/agente.py" "$NOVO/agente/agente.py" || agente_mudou=1
+
+chmod +x "$NOVO"/notificador/tty-notify "$NOVO"/notificador/vigia.sh "$NOVO"/facilitadores/tty-add "$NOVO"/facilitadores/tty-push \
+  "$NOVO"/projetos/tty-* "$NOVO"/agente/agente.py 2>/dev/null
+mv "$LIB" "$VELHO" && mv "$NOVO" "$LIB" || { [ -d "$VELHO" ] && [ ! -d "$LIB" ] && mv "$VELHO" "$LIB"; echo "falha ao trocar a pasta de scripts"; exit 1; }
+rm -rf "$VELHO"
+
+ln -sf "$LIB/notificador/tty-notify" "$BIN/tty-notify"
+ln -sf "$LIB/notificador/vigia.sh" "$BIN/tty-vigia"
+ln -sf "$LIB/facilitadores/tty-add" "$BIN/tty-add"
+ln -sf "$LIB/facilitadores/tty-push" "$BIN/tty-push"
+for f in tty-projeto tty-sessao tty-ttyd tty-supervisor tty-atualizar; do ln -sf "$LIB/projetos/$f" "$BIN/$f"; done
+ln -sf "$LIB/agente/agente.py" "$BIN/tty-agente"
+
+if [ -z "$mudou" ]; then echo "• já estava na versão do painel"; else echo "• atualizado: $mudou"; fi
+# plugin de avisos do OpenCode deste usuário (se existe) é regravado a partir do modelo do pacote
+if [ -z "${HOME:-}" ]; then
+  echo "• plugins: pulado (sem HOME, agente de sistema)"
+else
+  if [ -f "$HOME/.config/opencode/plugins/tty-notify.js" ]; then
+    if r=$(PATH="$BIN:$PATH" tty-add opencode --sem-config 2>&1); then echo "• plugin do OpenCode renovado"
+    else echo "• plugin do OpenCode: FALHOU ($(printf '%s' "$r" | tail -1))"; fi
+  else
+    echo "• plugin do OpenCode: não existe em $HOME/.config/opencode/plugins (rode tty-add opencode --sem-config)"
+  fi
+  # puxa os plugins de cada ferramenta já instalada (sem tocar na config local)
+  for f in claude opencode; do
+    command -v "$f" >/dev/null 2>&1 || continue
+    r=$(PATH="$BIN:$PATH" tty-add "$f" --plugins 2>&1) && echo "$r" | grep -E 'plugins|plugin ' || echo "• plugins de $f: FALHOU ($(printf '%s' "$r" | tail -1))"
+  done
+fi
+if [ "$agente_mudou" = 1 ]; then
+  # o agente que roda esta tarefa é o que vai reiniciar: adia, para a resposta chegar ao painel antes
+  if [ "$LIB" = /usr/local/lib/tty-orquestrador ] && command -v systemctl >/dev/null 2>&1; then
+    setsid nohup bash -c 'sleep 4; systemctl restart tty-orquestrador-agente.service' >/dev/null 2>&1 < /dev/null &
+    echo "• agente reinicia em 4 s"
+  else
+    # sem root: o tty-supervisor sobe o agente de novo sozinho (a cada 5 s)
+    setsid nohup bash -c 'sleep 4; pkill -u "$(id -u)" -f "[a]gente/agente.py|[t]ty-agente"' >/dev/null 2>&1 < /dev/null &
+    echo "• agente reinicia em 4 s (supervisor)"
+  fi
+fi
+exit 0

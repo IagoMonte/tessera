@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Gerencia projetos (diretório + usuário opcional) de uma máquina: um ttyd por projeto, quantos terminais quiser.
+#   tty-projeto add [<nome>] [--dir D] [--usuario U] [--porta N]   (sem nome/--dir: usa a pasta atual)
+#   tty-projeto rm <nome>
+#   tty-projeto ls
+# Modo sem root (instalado pelo bootstrap sem sudo): só grava/remove a configuração; o tty-supervisor
+# sobe e derruba o ttyd em até 5 s. Testes: TTY_SEM_SYSTEMD=1 gera as units em TTY_SYSTEMD_DIR sem tocar no systemd.
+set -euo pipefail
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"   # modo sem root: config no HOME do usuário
+if [ -n "${TTY_ETC:-}" ]; then ETC=$TTY_ETC; elif [ -r "$UETC/conf" ]; then ETC=$UETC; else ETC=/etc/tty-orquestrador; fi
+MODO_USUARIO=0; [ "$ETC" = "$UETC" ] && MODO_USUARIO=1
+SYSD=${TTY_SYSTEMD_DIR:-/etc/systemd/system}
+SEM_SYSTEMD=${TTY_SEM_SYSTEMD:-0}
+log() { printf '• %s\n' "$*"; }
+die() { printf 'erro: %s\n' "$*" >&2; exit 1; }
+
+cmd=${1:-}; shift || true
+if [ "$MODO_USUARIO" = 1 ]; then SEM_SYSTEMD=1
+else
+  [ "$SEM_SYSTEMD" = 1 ] || { [ "$EUID" -eq 0 ] || die "rode como root (sudo)"; [ -d /run/systemd/system ] || die "sem systemd (use TTY_SEM_SYSTEMD=1 para só gerar as units)"; }
+  mkdir -p "$SYSD"
+fi
+mkdir -p "$ETC/projetos"
+
+unit_projeto() { echo "tty-orquestrador-projeto-$1.service"; }
+unit_vigia()   { echo "tty-orquestrador-vigia-$1.service"; }
+valida_nome()  { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]] || die "nome inválido: use letras, números, _ e - (até 32)"; }
+sd() { [ "$SEM_SYSTEMD" = 1 ] || systemctl "$@"; }
+
+porta_livre() {
+  local p=7700 usadas
+  usadas=$(cat "$ETC"/projetos/*.conf 2>/dev/null | sed -n 's/^PORTA=//p'; { ss -ltn 2>/dev/null || true; } | awk 'NR>1{n=split($4,a,":"); print a[n]}')
+  while grep -qx "$p" <<<"$usadas"; do p=$((p + 1)); done
+  echo "$p"
+}
+
+garantir_vigia() {  # um vigia por usuário (cada usuário tem o seu servidor tmux)
+  local u=$1 un; un=$(unit_vigia "$u")
+  cat > "$SYSD/$un" <<UNIT
+[Unit]
+Description=Vigia heurístico das sessões tmux ($u)
+
+[Service]
+User=$u
+ExecStart=/usr/local/bin/tty-vigia
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sd daemon-reload; sd enable "$un" >/dev/null 2>&1 || true; sd restart "$un" || true
+}
+
+case $cmd in
+  add)
+    nome=
+    if [ -n "${1:-}" ] && [[ "$1" != --* ]]; then nome=$1; shift; fi
+    dir= usuario= porta=
+    while [ $# -gt 0 ]; do
+      case $1 in --dir) dir=$2; shift ;; --usuario) usuario=$2; shift ;; --porta) porta=$2; shift ;; *) die "opção desconhecida: $1" ;; esac
+      shift
+    done
+    [ -n "$dir" ] || dir=$PWD   # dentro da pasta do projeto: tty-projeto add
+    [ -d "$dir" ] || die "diretório não existe: $dir"
+    if [ -z "$nome" ]; then  # nome = nome da pasta, ajustado às regras (letras, números, _ e -)
+      nome=$(basename "$(cd "$dir" && pwd)" | sed 's/[^A-Za-z0-9_-]/-/g; s/^[^A-Za-z0-9]*//' | cut -c1-32)
+      [ -n "$nome" ] || die "não consegui derivar um nome da pasta; informe: tty-projeto add <nome>"
+    fi
+    valida_nome "$nome"
+    dir=$(cd "$dir" && pwd)
+    if [ "$MODO_USUARIO" = 1 ]; then usuario=$(id -un); else usuario=${usuario:-${SUDO_USER:-$(stat -c %U "$dir")}}; fi
+    id "$usuario" >/dev/null 2>&1 || die "usuário inexistente: $usuario"
+    conf="$ETC/projetos/$nome.conf"
+    if [ -z "$porta" ]; then
+      if [ -f "$conf" ]; then porta=$(sed -n 's/^PORTA=//p' "$conf"); else porta=$(porta_livre); fi
+    fi
+    [[ "$porta" =~ ^[0-9]+$ ]] && [ "$porta" -ge 1024 ] && [ "$porta" -le 65535 ] || die "porta inválida: $porta"
+    for outro in "$ETC"/projetos/*.conf; do
+      [ -e "$outro" ] && [ "$outro" != "$conf" ] && grep -qx "PORTA=$porta" "$outro" && die "porta $porta já usada por $(basename "$outro" .conf)"
+    done
+    dir_antigo=; [ -f "$conf" ] && dir_antigo=$(. "$conf" && printf '%s' "$DIR")
+    printf 'DIR=%q\nUSUARIO=%s\nPORTA=%s\n' "$dir" "$usuario" "$porta" > "$conf"
+    if [ "$MODO_USUARIO" = 1 ]; then
+      log "projeto $nome: $dir na porta $porta (o tty-supervisor sobe o ttyd em até 5 s)"
+      [ -n "$dir_antigo" ] && [ "$dir_antigo" != "$dir" ] && log "diretório alterado ($dir_antigo → $dir): o ttyd reinicia em até 5 s; terminais já abertos ficam no diretório antigo, os novos abrem no novo"
+      sup_pid=$(cat "${XDG_STATE_HOME:-${HOME:-/nao-definido}/.local/state}/tty-orquestrador/supervisor.pid" 2>/dev/null || true)
+      { [ -n "$sup_pid" ] && kill -0 "$sup_pid" 2>/dev/null; } || echo "aviso: tty-supervisor não está rodando; rode: tty-supervisor &" >&2
+      exit 0
+    fi
+    un=$(unit_projeto "$nome")
+    cat > "$SYSD/$un" <<UNIT
+[Unit]
+Description=TTY web do projeto $nome
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=$usuario
+WorkingDirectory=$dir
+ExecStart=/usr/local/bin/tty-ttyd $nome
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sd daemon-reload; sd enable "$un" >/dev/null 2>&1 || true; sd restart "$un"
+    garantir_vigia "$usuario"
+    log "projeto $nome: $dir (usuário $usuario) na porta $porta"
+    ;;
+  rm)
+    nome=${1:-}; valida_nome "$nome"
+    [ -f "$ETC/projetos/$nome.conf" ] || die "projeto inexistente: $nome"
+    un=$(unit_projeto "$nome")
+    if [ "$MODO_USUARIO" = 1 ]; then rm -f "$ETC/projetos/$nome.conf"; log "projeto $nome removido (o supervisor derruba o ttyd em até 5 s)"; exit 0; fi
+    sd disable --now "$un" >/dev/null 2>&1 || true
+    rm -f "$SYSD/$un" "$ETC/projetos/$nome.conf"; sd daemon-reload
+    log "projeto $nome removido (as sessões tmux e o diretório continuam)"
+    ;;
+  ls)
+    for c in "$ETC"/projetos/*.conf; do
+      [ -e "$c" ] || { echo "(nenhum projeto)"; break; }
+      ( . "$c"; printf '%-20s %-6s %-12s %s\n' "$(basename "$c" .conf)" "$PORTA" "$USUARIO" "$DIR" )
+    done
+    ;;
+  *) echo "uso: tty-projeto add <nome> --dir D [--usuario U] [--porta N] | rm <nome> | ls" >&2; exit 2 ;;
+esac

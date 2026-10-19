@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Abre (ou reanexa) um terminal de um projeto: sessão tmux persistente "projeto/terminal".
+# Chamado pelo ttyd (-a): o terminal vem de http://IP:PORTA/?arg=<terminal>.
+#   tty-sessao <projeto> <diretório> [terminal]
+set -u
+projeto=${1:?uso: tty-sessao <projeto> <dir> [terminal]}
+dir=${2:?uso: tty-sessao <projeto> <dir> [terminal]}
+terminal=${3:-main}
+[[ "$projeto" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]] || { echo "projeto inválido: $projeto" >&2; sleep 3; exit 2; }
+[[ "$terminal" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || { echo "terminal inválido (use letras, números, _ e -): $terminal" >&2; sleep 3; exit 2; }
+[ -d "$dir" ] || { echo "diretório não existe: $dir" >&2; sleep 3; exit 2; }
+cd "$dir" || exit 1
+# o painel já tem a barra de cada terminal: esconde a status line do tmux.
+# window-size latest: com vários dispositivos anexados (PC e celular), a janela segue o último que usou,
+# em vez de encolher para o menor e preencher o resto com pontos.
+exec tmux new-session -A -s "$projeto/$terminal" -c "$dir" \; set-option status off \; set-option window-size latest

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Envia a configuração local de uma ferramenta ao painel (para outras máquinas usarem com tty-add).
+#   tty-push <ferramenta>
+set -euo pipefail
+LIB=$(dirname "$(readlink -f "$0")")
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"   # modo sem root: config no HOME do usuário
+if [ -n "${TTY_ETC:-}" ]; then ETC=$TTY_ETC; elif [ -r "$UETC/conf" ]; then ETC=$UETC; else ETC=/etc/tty-orquestrador; fi
+if [ -n "${TTY_CONF:-}" ]; then CONF=$TTY_CONF; elif [ "$ETC" = "$UETC" ]; then CONF=$UETC/conf; else CONF=/etc/tty-orquestrador.conf; fi
+[ -r "$CONF" ] && . "$CONF"
+ferr=${1:?uso: tty-push <ferramenta>}
+[ -r "$LIB/ferramentas/$ferr.sh" ] || { echo "ferramenta desconhecida: $ferr" >&2; exit 2; }
+. "$LIB/ferramentas/$ferr.sh"
+[ -n "${PAINEL_URL:-}" ] || { echo "PAINEL_URL ausente em $CONF" >&2; exit 1; }
+
+existentes=()
+for item in "${ITENS[@]}"; do [ -e "$HOME/$item" ] && existentes+=("$item"); done
+[ ${#existentes[@]} -gt 0 ] || { echo "nada para enviar de $ferr em $HOME" >&2; exit 1; }
+tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+excl=(); for e in ${EXCLUIR[@]+"${EXCLUIR[@]}"}; do excl+=("--exclude=$e"); done   # arquivos que cada máquina gera sozinha (ex.: plugin de avisos)
+tar -czf "$tmp" "${excl[@]}" -C "$HOME" "${existentes[@]}"
+curl -fsS -m 60 -X POST --data-binary @"$tmp" "$PAINEL_URL/api/config/$ferr" >/dev/null
+echo "• enviado: ${existentes[*]} ($(stat -c %s "$tmp") bytes)"

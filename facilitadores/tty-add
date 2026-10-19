@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Instala uma ferramenta e traz a configuração dela do painel, sob demanda.
+#   tty-add <ferramenta> [--sem-config] [--so item1,item2]
+# As ferramentas são os arquivos de ferramentas/<nome>.sh (veja _modelo.sh).
+set -euo pipefail
+LIB=$(dirname "$(readlink -f "$0")")
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"   # modo sem root: config no HOME do usuário
+if [ -n "${TTY_ETC:-}" ]; then ETC=$TTY_ETC; elif [ -r "$UETC/conf" ]; then ETC=$UETC; else ETC=/etc/tty-orquestrador; fi
+if [ -n "${TTY_CONF:-}" ]; then CONF=$TTY_CONF; elif [ "$ETC" = "$UETC" ]; then CONF=$UETC/conf; else CONF=/etc/tty-orquestrador.conf; fi
+[ -r "$CONF" ] && . "$CONF"
+
+ferr=${1:-}; [ -n "$ferr" ] || { echo "uso: tty-add <ferramenta> [--sem-config] [--plugins] [--so a,b]" >&2; ls "$LIB/ferramentas" | sed 's/\.sh$//;/^_/d;s/^/  /' >&2; exit 2; }
+shift
+sem_config=0; so=; so_plugins=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --sem-config) sem_config=1 ;;
+    --so) so=$2; shift ;;
+    --plugins) so_plugins=1; sem_config=1 ;;   # só (re)instala os plugins; não mexe na config local
+    *) echo "opção desconhecida: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+arq="$LIB/ferramentas/$ferr.sh"
+[ -r "$arq" ] || { echo "ferramenta desconhecida: $ferr (veja $LIB/ferramentas/)" >&2; exit 2; }
+EXCLUIR=(); plugins() { :; }   # padrão; a ferramenta pode redefinir
+. "$arq"
+
+if command -v "$BIN" >/dev/null 2>&1; then
+  echo "• $BIN já instalado"
+else
+  echo "• instalando $BIN"
+  instalar
+fi
+
+if [ "$sem_config" = 0 ]; then
+  [ -n "${PAINEL_URL:-}" ] || { echo "PAINEL_URL ausente em $CONF; pulando config" >&2; sem_config=1; }
+fi
+if [ "$sem_config" = 0 ]; then
+  tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+  code=$(curl -sS -m 30 -o "$tmp" -w '%{http_code}' "$PAINEL_URL/api/config/$ferr" 2>/dev/null) || code=000
+  case $code in
+    200)
+      membros=()
+      if [ -n "$so" ]; then
+        for item in "${ITENS[@]}"; do
+          for quero in ${so//,/ }; do [ "$(basename "$item")" = "$quero" ] && membros+=("$item"); done
+        done
+        [ ${#membros[@]} -gt 0 ] || { echo "nenhum item casa com --so $so (itens: ${ITENS[*]})" >&2; exit 2; }
+      fi
+      tar -xzf "$tmp" -C "$HOME" "${membros[@]}"
+      echo "• config de $ferr aplicada em $HOME${so:+ (só $so)}" ;;
+    404) echo "• SEM CONFIG: o painel ainda não tem a config de $ferr (nada foi aplicado). Em uma máquina que já a tem, rode: tty-push $ferr" ;;
+    000) echo "• não consegui falar com o painel ($PAINEL_URL): a config de $ferr NÃO foi aplicada" >&2 ;;
+    *)   echo "• o painel respondeu HTTP $code ao buscar a config de $ferr: NÃO foi aplicada" >&2 ;;
+  esac
+fi
+
+command -v "$BIN" >/dev/null 2>&1 && plugins
+pos
+echo "• $ferr pronto"

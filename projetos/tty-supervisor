@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Modo sem root: mantém vivos o ttyd de cada projeto, o vigia e o agente, como o próprio usuário.
+# Relê a configuração a cada 5 s: projeto novo sobe, removido cai, e se o .conf de um projeto mudar o ttyd dele reinicia.
+# Uma instância por usuário (flock): pode ser chamado de cron a cada poucos minutos sem duplicar.
+#   tty-supervisor
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"
+ETC=${TTY_ETC:-$UETC}
+STATE=${TTY_STATE:-${XDG_STATE_HOME:-${HOME:-/nao-definido}/.local/state}/tty-orquestrador}
+export PATH="$HOME/.local/bin:$PATH"
+mkdir -p "$STATE"
+exec 9>"$STATE/supervisor.lock"
+flock -n 9 || exit 0
+echo $$ > "$STATE/supervisor.pid"
+
+declare -A PIDS ASSIN   # ASSIN: assinatura do .conf de cada projeto quando o ttyd foi iniciado
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$STATE/supervisor.log"; }
+limitar() { [ -f "$1" ] && [ "$(stat -c %s "$1")" -gt 5242880 ] && : > "$1"; true; }
+vivo() { [ -n "${PIDS[$1]:-}" ] && kill -0 "${PIDS[$1]}" 2>/dev/null; }  # (kill -0 com PID vazio/0 atinge o grupo todo)
+iniciar() {  # iniciar <chave> <comando...>
+  local k=$1; shift
+  limitar "$STATE/$k.log"
+  "$@" >> "$STATE/$k.log" 2>&1 &
+  PIDS[$k]=$!
+  log "iniciado $k (pid ${PIDS[$k]})"
+}
+encerrar_tudo() {
+  for k in "${!PIDS[@]}"; do kill "${PIDS[$k]}" 2>/dev/null; done
+  rm -f "$STATE/supervisor.pid"
+  exit 0
+}
+trap encerrar_tudo TERM INT HUP
+
+while :; do
+  desejados=" vigia agente "
+  for c in "$ETC"/projetos/*.conf; do
+    [ -e "$c" ] || continue
+    n=$(basename "$c" .conf)
+    [[ "$n" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]] && desejados+="projeto:$n "
+  done
+  for k in $desejados; do
+    assin=
+    case $k in projeto:*) assin=$(cksum < "$ETC/projetos/${k#projeto:}.conf" 2>/dev/null || true) ;; esac
+    # o diretório/porta vão embutidos nos argumentos do ttyd: se o .conf mudou, derruba o ttyd para subir com o novo
+    if vivo "$k" && [ -n "$assin" ] && [ "${ASSIN[$k]:-$assin}" != "$assin" ]; then
+      log "reiniciando $k: a configuração mudou"
+      kill "${PIDS[$k]}" 2>/dev/null; wait "${PIDS[$k]}" 2>/dev/null
+    fi
+    if ! vivo "$k"; then
+      case $k in
+        vigia) iniciar vigia tty-vigia ;;
+        agente) iniciar agente tty-agente ;;
+        projeto:*) iniciar "$k" tty-ttyd "${k#projeto:}"; ASSIN[$k]=$assin ;;
+      esac
+    fi
+  done
+  for k in "${!PIDS[@]}"; do  # projeto removido: derruba o ttyd dele
+    case "$desejados" in *" $k "*) ;; *) kill "${PIDS[$k]}" 2>/dev/null; unset "PIDS[$k]" "ASSIN[$k]"; log "encerrado $k" ;; esac
+  done
+  sleep "${TTY_SUP_INTERVALO:-5}" & wait $!
+done
