@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera · entrar</title>
+<link rel="stylesheet" href="/static/login.css">
+</head>
+<body>
+<form class="cartao" id="f" autocomplete="off">
+  <h1>Tessera</h1>
+  <label for="senha">Senha</label>
+  <input id="senha" name="senha" type="password" autocomplete="current-password" required>
+  <label for="codigo">Código do autenticador</label>
+  <input id="codigo" name="codigo" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+  <button id="ok" type="submit">Entrar</button>
+  <div class="erro" id="erro" role="alert"></div>
+</form>
+<script src="/static/login.js"></script>
+</body>
+</html>

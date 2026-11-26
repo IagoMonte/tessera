@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fecha a porta de um ttyd para TODOS, exceto o painel (pelo IP dele na tailnet). Nem o loopback passa: outro usuário
+# DA MESMA máquina leria o CRED no argv do ttyd e abriria o terminal do dono por aqui. Roda como root, antes do ttyd
+# subir (ExecStartPre=+ da unit do projeto). Assim, mesmo com o CRED, o token ou uma TS_API_KEY roubados, ninguém na tailnet
+# (nem outra máquina) alcança o terminal: só o painel, depois do login. Também cobre o ttyd 1.7.4, que ignorou "-i" e escutou em
+# 0.0.0.0. Idempotente. Sem iptables ou sem PAINEL_TS_IP falha FECHADO (a unit não sobe / ninguém entra).
+#   tty-firewall <porta>   (lê PAINEL_TS_IP de /etc/tty-orquestrador.conf; TTY_IFACE = interface da tailnet; TTY_FW_DRY=1 só imprime)
+set -eu
+porta=${1:?uso: tty-firewall <porta>}
+[[ "$porta" =~ ^[0-9]+$ ]] && [ "$porta" -ge 1024 ] && [ "$porta" -le 65535 ] || { echo "tty-firewall: porta inválida" >&2; exit 2; }
+CONF=${TTY_CONF:-/etc/tty-orquestrador.conf}
+[ -r "$CONF" ] && . "$CONF"
+IFACE=${TTY_IFACE:-tailscale0}
+PAINEL_IP=${PAINEL_TS_IP:-}
+[[ -z "$PAINEL_IP" || "$PAINEL_IP" =~ ^[0-9a-fA-F:.]+$ ]] || { echo "tty-firewall: PAINEL_TS_IP inválido" >&2; exit 2; }
+[ -n "$PAINEL_IP" ] || echo "tty-firewall: sem PAINEL_TS_IP no $CONF: ninguém além do loopback alcança o terminal (reinstale com o convite atual)" >&2
+CAD=TESSERA-TTYD
+run() { if [ "${TTY_FW_DRY:-0}" = 1 ]; then echo "$*"; else "$@"; fi; }
+for ipt in iptables ip6tables; do
+  if [ "${TTY_FW_DRY:-0}" != 1 ]; then
+    command -v "$ipt" >/dev/null || { [ "$ipt" = ip6tables ] && continue; echo "tty-firewall: iptables ausente; não subo o ttyd sem firewall" >&2; exit 1; }
+    [ "$EUID" -eq 0 ] || { echo "tty-firewall: precisa de root" >&2; exit 1; }
+    $ipt -n -L "$CAD" >/dev/null 2>&1 || run $ipt -N "$CAD"
+    $ipt -C INPUT -j "$CAD" 2>/dev/null || run $ipt -I INPUT 1 -j "$CAD"
+    # refaz as regras desta porta (o IP do painel pode ter mudado): apaga as antigas e acrescenta as 3 na ordem certa
+    while read -r r; do [ -n "$r" ] && $ipt ${r/-A/-D}; done < <($ipt -S "$CAD" 2>/dev/null | grep -- "--dport $porta " || true)
+  else
+    echo "$ipt -N $CAD"; echo "$ipt -I INPUT 1 -j $CAD"
+  fi
+  # o endereço do painel só vale na família certa (v4 no iptables, v6 no ip6tables)
+  if [ -n "$PAINEL_IP" ] && { [ "$ipt" = ip6tables ] && [[ "$PAINEL_IP" == *:* ]] || [ "$ipt" = iptables ] && [[ "$PAINEL_IP" != *:* ]]; }; then
+    run $ipt -A "$CAD" -i "$IFACE" -s "$PAINEL_IP" -p tcp --dport "$porta" -j RETURN
+  fi
+  run $ipt -A "$CAD" -p tcp --dport "$porta" -j DROP
+done

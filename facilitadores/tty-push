@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Envia a configuração local de uma ferramenta ao painel (para outras máquinas usarem com tty-add).
+#   tty-push <ferramenta>
+set -euo pipefail
+LIB=$(dirname "$(readlink -f "$0")")
+UETC="${XDG_CONFIG_HOME:-${HOME:-/nao-definido}/.config}/tty-orquestrador"   # modo sem root: config no HOME do usuário
+if [ -n "${TTY_ETC:-}" ]; then ETC=$TTY_ETC; elif [ -r "$UETC/conf" ]; then ETC=$UETC; else ETC=/etc/tty-orquestrador; fi
+if [ -n "${TTY_CONF:-}" ]; then CONF=$TTY_CONF; elif [ "$ETC" = "$UETC" ]; then CONF=$UETC/conf; else CONF=/etc/tty-orquestrador.conf; fi
+[ -r "$CONF" ] && . "$CONF"
+ferr=${1:?uso: tty-push <ferramenta>}
+[ -r "$LIB/ferramentas/$ferr.sh" ] || { echo "ferramenta desconhecida: $ferr" >&2; exit 2; }
+. "$LIB/ferramentas/$ferr.sh"
+[ -n "${PAINEL_URL:-}" ] || { echo "PAINEL_URL ausente em $CONF" >&2; exit 1; }
+
+existentes=()
+for item in "${ITENS[@]}"; do [ -e "$HOME/$item" ] && existentes+=("$item"); done
+[ ${#existentes[@]} -gt 0 ] || { echo "nada para enviar de $ferr em $HOME" >&2; exit 1; }
+tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+excl=(); for e in ${EXCLUIR[@]+"${EXCLUIR[@]}"}; do excl+=("--exclude=$e"); done   # arquivos que cada máquina gera sozinha (ex.: plugin de avisos)
+tar -czf "$tmp" "${excl[@]}" -C "$HOME" "${existentes[@]}"
+# sobrescrever a config que TODAS as máquinas aplicam é privilégio do dono: o token de máquina não basta, use a senha do painel
+[ -n "${TTY_SENHA:-}" ] || { echo "defina TTY_SENHA (a PAINEL_SENHA) e, no painel de produção, TTY_TOTP (código atual do autenticador) para enviar a config: o token da máquina não pode sobrescrevê-la" >&2; exit 1; }
+if [ -n "${TTY_TOTP:-}" ]; then  # painel de produção (2FA): faz o login (senha + código do app) e usa a sessão, como o navegador
+  jar=$(mktemp); trap 'rm -f "$tmp" "$jar"' EXIT
+  jq -n --arg s "$TTY_SENHA" --arg c "$TTY_TOTP" '{senha:$s,codigo:$c}' \
+    | curl -fsS -m 20 -c "$jar" -H 'Content-Type: application/json' -d @- "$PAINEL_URL/api/login" >/dev/null || { echo "login recusado (senha ou código TTY_TOTP errado/expirado)" >&2; exit 1; }
+  curl -fsS -m 60 -b "$jar" -X POST --data-binary @"$tmp" "$PAINEL_URL/api/config/$ferr" >/dev/null
+else  # dev/testes (sem 2FA): Basic
+  curl -fsS -m 60 -u "tessera:$TTY_SENHA" -X POST --data-binary @"$tmp" "$PAINEL_URL/api/config/$ferr" >/dev/null
+fi
+echo "• enviado: ${existentes[*]} ($(stat -c %s "$tmp") bytes)"
